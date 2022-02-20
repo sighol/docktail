@@ -1,12 +1,18 @@
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
-use shiplift::{builder::ContainerListOptions, tty::TtyChunk, Docker, LogsOptions};
-
 use serde::Serialize;
-use std::{
-    collections::HashMap,
-    error::Error,
-    time::{SystemTime, UNIX_EPOCH},
+use shiplift::{
+    builder::ContainerListOptions, rep::Container as RepContainer, tty::TtyChunk, Docker,
+    LogsOptions,
 };
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use tokio::{self, task::JoinHandle};
 
 // The loki code is taken from this repository
 // https://github.com/nwmqpa/loki-logger
@@ -78,6 +84,7 @@ fn time_offset_since(start: SystemTime) -> Result<String, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    let start_time: DateTime<Utc> = Utc::now();
     let docker = Docker::new();
     let loki_url = match std::env::var("LOKI_URL") {
         Ok(x) => x,
@@ -87,70 +94,107 @@ async fn main() -> eyre::Result<()> {
         }
     };
 
-    let containers = docker
-        .containers()
-        .list(&ContainerListOptions::builder().all().build())
-        .await?;
+    let containers_set = Arc::new(Mutex::new(HashSet::<String>::new()));
 
-    let containers = containers
-        .into_iter()
-        .filter(|x| x.state == "running")
-        .collect::<Vec<_>>();
+    loop {
+        let containers = docker
+            .containers()
+            .list(&ContainerListOptions::builder().all().build())
+            .await?;
 
-    for container in containers.iter() {
-        println!(
-            "container {}. state={}, name={}",
-            container.id,
-            container.state,
-            container.names.get(0).unwrap_or(&"oops".to_string())
-        );
-    }
+        let containers = {
+            let set = containers_set.clone();
+            let set = set.lock().unwrap();
+            containers
+                .into_iter()
+                .filter(|x| x.state == "running" && !set.contains(&x.id))
+                .collect::<Vec<_>>()
+        };
 
-    let mut jobs = vec![];
-    for container_rep in containers {
-        let docker = docker.clone();
-        let loki_url = loki_url.clone();
-        let job = tokio::spawn(async move {
-            let container = docker.containers().get(container_rep.id);
-            let mut stream = container.logs(
-                &LogsOptions::builder()
-                    .stdout(true)
-                    .stderr(true)
-                    .tail("1")
-                    .follow(true)
-                    .build(),
+        for container_rep in containers {
+            spawn_job(
+                docker.clone(),
+                loki_url.clone(),
+                container_rep.clone(),
+                containers_set.clone(),
+                start_time,
             );
+        }
 
-            let container_name = match container_rep.names.first() {
-                Some(x) => x,
-                None => "unknown container",
-            };
-            let mut map = HashMap::<String, String>::new();
-            map.insert("container".into(), container_name.into());
-
-            let loki = LokiLogger::new(&loki_url, Some(map));
-
-            while let Some(log_result) = stream.next().await {
-                match log_result {
-                    Ok(chunk) => print_chunk(&loki, chunk)
-                        .await
-                        .expect("Failed to push loki log"),
-                    Err(e) => eprintln!("Error: {}", e),
-                }
-            }
-        });
-
-        jobs.push(job);
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
-
-    for j in jobs {
-        j.await?;
-    }
-
-    Ok(())
 }
 
-async fn print_chunk(loki: &LokiLogger, chunk: TtyChunk) -> Result<(), Box<dyn Error>> {
+fn spawn_job(
+    docker: Docker,
+    loki_url: String,
+    container_rep: RepContainer,
+    set: Arc<Mutex<HashSet<String>>>,
+    start_time: DateTime<Utc>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let container = docker.containers().get(&container_rep.id);
+
+        // If the container is newer than this program, then we should grab all
+        // log lines, so that we don't miss anything. However, for older
+        // containers, it is more likely that it was this program that was
+        // restarted, so we shouldn't add duplicated lines.
+        let tail = if container_rep.created > start_time {
+            "all"
+        } else {
+            "0"
+        };
+
+        println!(
+            "container {}. state={}, name={}, tail={}",
+            container_rep.id,
+            container_rep.state,
+            container_rep.names.get(0).unwrap_or(&"oops".to_string()),
+            tail,
+        );
+
+        let mut stream = container.logs(
+            &LogsOptions::builder()
+                .stdout(true)
+                .stderr(true)
+                .tail(tail)
+                .follow(true)
+                .build(),
+        );
+
+        let container_name = match container_rep.names.first() {
+            Some(x) => x,
+            None => "unknown container",
+        };
+        let mut map = HashMap::<String, String>::new();
+        map.insert("container".into(), container_name.into());
+
+        let loki = LokiLogger::new(&loki_url, Some(map));
+
+        {
+            let mut set = set.lock().expect("Failed to lock Arc");
+            set.insert(container_rep.id.clone());
+        }
+
+        while let Some(log_result) = stream.next().await {
+            match log_result {
+                Ok(chunk) => match push_to_loki(&loki, chunk).await {
+                    Ok(_) => (),
+                    Err(e) => eprintln!("Failed to push to loki log: {}", e),
+                },
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+
+        {
+            let mut set = set.lock().expect("Failed to lock Arc");
+            set.remove(&container_rep.id);
+        }
+        println!("{} is done!", &container_name);
+    })
+}
+
+async fn push_to_loki(loki: &LokiLogger, chunk: TtyChunk) -> Result<(), Box<dyn Error>> {
     let text = match chunk {
         TtyChunk::StdOut(bytes) => std::str::from_utf8(&bytes).unwrap().to_string(),
         TtyChunk::StdErr(bytes) => std::str::from_utf8(&bytes).unwrap().to_string(),

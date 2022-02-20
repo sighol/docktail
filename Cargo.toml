@@ -8,8 +8,9 @@ edition = "2021"
 [dependencies]
 futures = "0.3.21"
 reqwest = {version = "0.11.9", features = ["json"] }
-shiplift = "0.7.0"
+shiplift = {version = "0.7.0", features = ["chrono"] }
 tokio = { version = "1.16.1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 eyre = "0.6.6"
 stable-eyre = "0.2.2"
+chrono = "0.4"
