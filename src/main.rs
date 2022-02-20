@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use futures::StreamExt;
 use serde::Serialize;
 use shiplift::{
@@ -9,12 +9,16 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
+
+use eyre::{eyre, ContextCompat, WrapErr};
+
+use serde_json::{self, Map, Value};
 
 use tokio::{self, task::JoinHandle};
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
@@ -65,12 +69,53 @@ impl LokiLogger {
     }
 }
 
+fn map_get_i64(map: &Map<String, Value>, key: &str) -> Option<i64> {
+    if let Some(Value::Number(seconds)) = &map.get(key) {
+        let seconds_float = seconds
+            .as_f64()
+            .expect("Without arbitrary precision, this is always Some")
+            as i64;
+        Some(seconds_float)
+    } else {
+        None
+    }
+}
+
+fn try_parse_datetime(message: &str) -> eyre::Result<DateTime<Utc>> {
+    let value = serde_json::from_str::<Value>(message)?;
+    let obj = match value {
+        Value::Object(o) => Ok(o),
+        _ => Err(eyre!("Not an object")),
+    }?;
+    let time = match obj.get("time").or_else(|| obj.get("timestamp")) {
+        Some(x) => Ok(x),
+        None => Err(eyre!("Not an object")),
+    }?;
+    match time {
+        Value::String(x) => Utc.datetime_from_str(x, "%+").wrap_err("ooph"),
+        Value::Object(o) => {
+            let seconds_result = map_get_i64(o, "seconds");
+            let nanos_result = map_get_i64(o, "nanos");
+            if let (Some(seconds), Some(nanos)) = (seconds_result, nanos_result) {
+                let start = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+                let duration = ChronoDuration::seconds(seconds as i64)
+                    + ChronoDuration::nanoseconds(nanos as i64);
+                Ok(start + duration)
+            } else {
+                Err(eyre!("Not an object"))
+            }
+        }
+        _ => Err(eyre!("Not an object")),
+    }
+}
+
 fn make_request(
     message: String,
     labels: HashMap<String, String>,
 ) -> Result<LokiRequest, Box<dyn Error>> {
-    let start = SystemTime::now();
-    let time_ns = time_offset_since(start)?;
+    let start = try_parse_datetime(&message).unwrap_or_else(|_| Utc::now());
+    let time_ns: i64 = time_offset_since(start).wrap_err("No start time")?;
+    let time_ns: String = time_ns.to_string();
     let loki_request = LokiRequest {
         streams: vec![LokiStream {
             stream: labels,
@@ -80,15 +125,16 @@ fn make_request(
     Ok(loki_request)
 }
 
-fn time_offset_since(start: SystemTime) -> Result<String, Box<dyn Error>> {
-    let since_start = start.duration_since(UNIX_EPOCH)?;
-    let time_ns = since_start.as_nanos().to_string();
-    Ok(time_ns)
+fn time_offset_since(time: DateTime<Utc>) -> Option<i64> {
+    let start = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+    let since_start = time - start;
+    since_start.num_nanoseconds()
 }
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    let formatting_layer = BunyanFormattingLayer::new("tracing_demo".into(), std::io::stdout);
+    let formatting_layer =
+        BunyanFormattingLayer::new(env!("CARGO_PKG_NAME").into(), std::io::stdout);
     let subscriber = Registry::default()
         .with(JsonStorageLayer)
         .with(formatting_layer);
