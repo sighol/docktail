@@ -14,6 +14,10 @@ use std::{
 
 use tokio::{self, task::JoinHandle};
 
+use tracing::{error, info};
+use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
+use tracing_subscriber::{layer::SubscriberExt, Registry};
+
 // The loki code is taken from this repository
 // https://github.com/nwmqpa/loki-logger
 // That is AGPL, which I don't want this repository to be.
@@ -84,12 +88,20 @@ fn time_offset_since(start: SystemTime) -> Result<String, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    let formatting_layer = BunyanFormattingLayer::new("tracing_demo".into(), std::io::stdout);
+    let subscriber = Registry::default()
+        .with(JsonStorageLayer)
+        .with(formatting_layer);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    info!("Orphan event without a parent span");
+
     let start_time: DateTime<Utc> = Utc::now();
     let docker = Docker::new();
     let loki_url = match std::env::var("LOKI_URL") {
         Ok(x) => x,
         Err(_) => {
-            eprintln!("Please set the LOKI_URL environment variable");
+            error!("Please set the LOKI_URL environment variable");
             std::process::exit(1);
         }
     };
@@ -145,7 +157,7 @@ fn spawn_job(
             "0"
         };
 
-        println!(
+        info!(
             "container {}. state={}, name={}, tail={}",
             container_rep.id,
             container_rep.state,
@@ -180,9 +192,9 @@ fn spawn_job(
             match log_result {
                 Ok(chunk) => match push_to_loki(&loki, chunk).await {
                     Ok(_) => (),
-                    Err(e) => eprintln!("Failed to push to loki log: {}", e),
+                    Err(e) => error!("Failed to push to loki log: {}", e),
                 },
-                Err(e) => eprintln!("Error: {}", e),
+                Err(e) => error!("Error: {}", e),
             }
         }
 
@@ -190,7 +202,7 @@ fn spawn_job(
             let mut set = set.lock().expect("Failed to lock Arc");
             set.remove(&container_rep.id);
         }
-        println!("{} is done!", &container_name);
+        info!("{} is done!", &container_name);
     })
 }
 
