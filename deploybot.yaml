@@ -24,6 +24,7 @@ compose:
         - "/var/run/docker.sock:/var/run/docker.sock:ro"
       depends_on:
         - loki
+      restart: always
 
 
   volumes:
