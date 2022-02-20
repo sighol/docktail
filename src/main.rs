@@ -48,12 +48,8 @@ impl LokiLogger {
         };
 
         let loki_request = make_request(message, labels)?;
-        println!("Sending request: {:?}", &loki_request);
         match client.post(url).json(&loki_request).send().await {
-            Ok(response) => {
-                println!("Received response: {:?}", response);
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(x) => Err(Box::new(x)),
         }
     }
@@ -81,7 +77,7 @@ fn time_offset_since(start: SystemTime) -> Result<String, Box<dyn Error>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> eyre::Result<()> {
     let docker = Docker::new();
     let loki_url = match std::env::var("LOKI_URL") {
         Ok(x) => x,
@@ -116,7 +112,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let loki_url = loki_url.clone();
         let job = tokio::spawn(async move {
             let container = docker.containers().get(container_rep.id);
-            // let job = tokio::spawn(async move {
             let mut stream = container.logs(
                 &LogsOptions::builder()
                     .stdout(true)

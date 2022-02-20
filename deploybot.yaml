@@ -1,4 +1,4 @@
-name: logging
+name: docktail
 server: sighol2
 domain: 
 port: 3000
@@ -18,6 +18,13 @@ compose:
 
     docktail:
       build: .
+      environment:
+        LOKI_URL: "http://loki:3100/loki/api/v1/push"
+      volumes:
+        - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      depends_on:
+        - loki
+
 
   volumes:
     loki: {}
