@@ -7,14 +7,17 @@ use shiplift::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::mpsc::{channel, Sender},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use eyre::{self, ContextCompat, WrapErr};
 
-use tokio::{self, task::JoinHandle};
+use tokio::{
+    self,
+    sync::mpsc::{unbounded_channel, UnboundedSender},
+    task::JoinHandle,
+};
 
 use tracing::{error, info};
 use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
@@ -77,8 +80,6 @@ async fn main() -> eyre::Result<()> {
         .with(formatting_layer);
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    info!("Orphan event without a parent span");
-
     let start_time: DateTime<Utc> = Utc::now();
     let docker = Docker::new();
     let loki_url = match std::env::var("LOKI_URL") {
@@ -88,12 +89,15 @@ async fn main() -> eyre::Result<()> {
             std::process::exit(1);
         }
     };
+    info!("Starting docktail...");
+    info!("Logging to {}", &loki_url);
 
-    let (sender, receiver) = channel::<LokiRequest>();
+    let (sender, mut receiver) = unbounded_channel::<LokiRequest>();
     tokio::spawn(async move {
         let loki = LokiLogger::new(&loki_url);
+
         loop {
-            let next_message = receiver.recv().wrap_err("Receive channel failed").unwrap();
+            let next_message = receiver.recv().await.expect("Channel is dead");
             match loki.log(next_message).await {
                 Ok(_) => (),
                 Err(e) => error!("Failed to send message to loki: {}", e),
@@ -103,6 +107,7 @@ async fn main() -> eyre::Result<()> {
 
     let containers_set = Arc::new(Mutex::new(HashSet::<String>::new()));
 
+    info!("Looking for containers...");
     loop {
         let containers = docker
             .containers()
@@ -137,7 +142,7 @@ fn spawn_job(
     container_rep: RepContainer,
     set: Arc<Mutex<HashSet<String>>>,
     start_time: DateTime<Utc>,
-    sender: Sender<LokiRequest>,
+    sender: UnboundedSender<LokiRequest>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let container = docker.containers().get(&container_rep.id);
