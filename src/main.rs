@@ -1,6 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
 use futures::StreamExt;
-use serde::Serialize;
 use shiplift::{
     builder::ContainerListOptions, rep::Container as RepContainer, tty::TtyChunk, Docker,
     LogsOptions,
@@ -23,53 +22,8 @@ use tracing::{error, info};
 use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
-use reqwest;
-
-// The loki code is taken from this repository
-// https://github.com/nwmqpa/loki-logger
-// That is AGPL, which I don't want this repository to be.
-// But, the code is basically just using the Loki's API. So is it really copyrightable?
-#[derive(Serialize, Debug)]
-struct LokiStream {
-    stream: HashMap<String, String>,
-    values: Vec<[String; 2]>,
-}
-
-#[derive(Serialize, Debug)]
-struct LokiRequest {
-    streams: Vec<LokiStream>,
-}
-
-struct LokiLogger {
-    url: String,
-    client: reqwest::Client,
-}
-
-impl LokiLogger {
-    fn new<S: AsRef<str>>(url: S) -> Self {
-        Self {
-            url: url.as_ref().to_string(),
-            client: reqwest::Client::new(),
-        }
-    }
-
-    async fn log(&self, message: LokiRequest) -> eyre::Result<reqwest::Response> {
-        let client = self.client.clone();
-        let url = self.url.clone();
-        client
-            .post(url)
-            .json(&message)
-            .send()
-            .await
-            .wrap_err("Reqwest")
-    }
-}
-
-fn time_offset_since(time: DateTime<Utc>) -> Option<i64> {
-    let start = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
-    let since_start = time - start;
-    since_start.num_nanoseconds()
-}
+mod loki;
+use loki::{LokiLogger, LokiRequest, LokiStream};
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -198,12 +152,14 @@ fn spawn_job(
             }
         }
 
-        {
-            let mut set = set.lock().expect("Failed to lock Arc");
-            set.remove(&container_rep.id);
-        }
+        let mut set = set.lock().expect("Failed to lock Arc");
+        set.remove(&container_rep.id);
         info!("{} is done!", &container_name);
     })
+}
+
+fn extract_text(chunk: TtyChunk) -> eyre::Result<String> {
+    Ok(std::str::from_utf8(&chunk)?.to_string())
 }
 
 fn create_message(message: String, labels: HashMap<String, String>) -> eyre::Result<LokiRequest> {
@@ -219,12 +175,8 @@ fn create_message(message: String, labels: HashMap<String, String>) -> eyre::Res
     Ok(loki_request)
 }
 
-fn extract_text(chunk: TtyChunk) -> eyre::Result<String> {
-    let text = match chunk {
-        TtyChunk::StdOut(bytes) => std::str::from_utf8(&bytes)?.to_string(),
-        TtyChunk::StdErr(bytes) => std::str::from_utf8(&bytes)?.to_string(),
-        TtyChunk::StdIn(_) => unreachable!(),
-    };
-
-    Ok(text)
+fn time_offset_since(time: DateTime<Utc>) -> Option<i64> {
+    let start = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+    let since_start = time - start;
+    since_start.num_nanoseconds()
 }
