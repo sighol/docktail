@@ -1,5 +1,13 @@
 use chrono::{DateTime, TimeZone, Utc};
 use futures::StreamExt;
+
+use hyper::{
+    header::CONTENT_TYPE,
+    service::{make_service_fn, service_fn},
+    Body, Request, Response, Server,
+};
+use lazy_static::lazy_static;
+use prometheus::{opts, register_counter, Counter, Encoder, TextEncoder};
 use shiplift::{
     builder::ContainerListOptions, rep::Container as RepContainer, tty::TtyChunk, Docker,
     LogsOptions,
@@ -16,6 +24,7 @@ use tokio::{
     self,
     sync::mpsc::{unbounded_channel, UnboundedSender},
     task::JoinHandle,
+    time::sleep,
 };
 
 use tracing::{error, info};
@@ -25,6 +34,48 @@ use tracing_subscriber::{layer::SubscriberExt, Registry};
 mod loki;
 use loki::{LokiLogger, LokiRequest, LokiStream};
 
+lazy_static! {
+    static ref LOKI_REQUEST_COUNTER: Counter = register_counter!(opts!(
+        "docktail_loki_requests",
+        "Number of loki requests made."
+    ))
+    .unwrap();
+    static ref LOKI_STREAM_COUNTER: Counter = register_counter!(opts!(
+        "docktail_loki_streams",
+        "Number of loki streams made. (Loki log lines)"
+    ))
+    .unwrap();
+}
+
+async fn serve_req(_req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    let encoder = TextEncoder::new();
+
+    let metric_families = prometheus::gather();
+    let mut buffer = vec![];
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+
+    let response = Response::builder()
+        .status(200)
+        .header(CONTENT_TYPE, encoder.format_type())
+        .body(Body::from(buffer))
+        .unwrap();
+
+    Ok(response)
+}
+
+async fn prometheus_server() {
+    let addr = ([0, 0, 0, 0], 9898).into();
+    info!("Prometheus server listening on http://{}", addr);
+
+    let serve_future = Server::bind(&addr).serve(make_service_fn(|_| async {
+        Ok::<_, hyper::Error>(service_fn(serve_req))
+    }));
+
+    if let Err(err) = serve_future.await {
+        error!("server error: {}", err);
+    }
+}
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     let formatting_layer =
@@ -33,6 +84,8 @@ async fn main() -> eyre::Result<()> {
         .with(JsonStorageLayer)
         .with(formatting_layer);
     tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    tokio::spawn(async { prometheus_server().await });
 
     let start_time: DateTime<Utc> = Utc::now();
     let docker = Docker::new();
@@ -46,16 +99,33 @@ async fn main() -> eyre::Result<()> {
     info!("Starting docktail...");
     info!("Logging to {}", &loki_url);
 
-    let (sender, mut receiver) = unbounded_channel::<LokiRequest>();
+    let (sender, mut receiver) = unbounded_channel::<LokiStream>();
     tokio::spawn(async move {
         let loki = LokiLogger::new(&loki_url);
 
         loop {
-            let next_message = receiver.recv().await.expect("Channel is dead");
-            match loki.log(next_message).await {
-                Ok(_) => (),
-                Err(e) => error!("Failed to send message to loki: {}", e),
+            let mut loki_request = LokiRequest { streams: vec![] };
+            loop {
+                match receiver.try_recv() {
+                    Ok(m) => {
+                        LOKI_STREAM_COUNTER.inc();
+                        loki_request.streams.push(m)
+                    }
+                    Err(_) => {
+                        // Either disconnect or empty. In both cases, we are done retrieving streams.
+                        break;
+                    }
+                }
             }
+            if loki_request.streams.len() > 0 {
+                LOKI_REQUEST_COUNTER.inc();
+                match loki.log(loki_request).await {
+                    Ok(_) => (),
+                    Err(e) => error!("Failed to send message to loki: {:?}", e),
+                }
+            }
+
+            sleep(Duration::from_millis(100)).await;
         }
     });
 
@@ -96,7 +166,7 @@ fn spawn_job(
     container_rep: RepContainer,
     set: Arc<Mutex<HashSet<String>>>,
     start_time: DateTime<Utc>,
-    sender: UnboundedSender<LokiRequest>,
+    sender: UnboundedSender<LokiStream>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let container = docker.containers().get(&container_rep.id);
@@ -148,7 +218,7 @@ fn spawn_job(
                 .and_then(|request| Ok(sender.send(request)));
             match result {
                 Ok(_) => (),
-                Err(e) => error!("Failed to create loki logger request message {}", e),
+                Err(e) => error!("Failed to create loki logger request message {:?}", e),
             }
         }
 
@@ -162,21 +232,18 @@ fn extract_text(chunk: TtyChunk) -> eyre::Result<String> {
     Ok(std::str::from_utf8(&chunk)?.to_string())
 }
 
-fn create_message(message: String, labels: HashMap<String, String>) -> eyre::Result<LokiRequest> {
+fn create_message(message: String, labels: HashMap<String, String>) -> eyre::Result<LokiStream> {
     let start = Utc::now();
     let time_ns: i64 = time_offset_since(start).wrap_err("No start time")?;
     let time_ns: String = time_ns.to_string();
-    let loki_request = LokiRequest {
-        streams: vec![LokiStream {
-            stream: labels,
-            values: vec![[time_ns, message]],
-        }],
-    };
-    Ok(loki_request)
+    Ok(LokiStream {
+        stream: labels,
+        values: vec![[time_ns, message]],
+    })
 }
 
 fn time_offset_since(time: DateTime<Utc>) -> Option<i64> {
-    let start = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+    let start = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).single()?;
     let since_start = time - start;
     since_start.num_nanoseconds()
 }

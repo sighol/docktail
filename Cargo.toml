@@ -18,5 +18,8 @@ tracing = {version = "0.1.31", features = ["max_level_info"]}
 tracing-bunyan-formatter = "0.3.2"
 tracing-subscriber = "0.3.9"
 log = {version = "0.4.14", features = ["max_level_info"]}
+prometheus = "0.13.3"
+hyper = "0.14.25"
+lazy_static = "1.4.0"
 
 [features]
