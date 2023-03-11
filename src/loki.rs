@@ -26,9 +26,9 @@ pub struct LokiLogger {
 }
 
 impl LokiLogger {
-    pub fn new<S: AsRef<str>>(url: S) -> Self {
+    pub fn new(url: String) -> Self {
         Self {
-            url: url.as_ref().to_string(),
+            url: url,
             client: reqwest::Client::new(),
         }
     }

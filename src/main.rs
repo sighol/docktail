@@ -101,7 +101,7 @@ async fn main() -> eyre::Result<()> {
 
     let (sender, mut receiver) = unbounded_channel::<LokiStream>();
     tokio::spawn(async move {
-        let loki = LokiLogger::new(&loki_url);
+        let loki = LokiLogger::new(loki_url);
 
         loop {
             let mut loki_request = LokiRequest { streams: vec![] };
@@ -125,7 +125,7 @@ async fn main() -> eyre::Result<()> {
                 }
             }
 
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(500)).await;
         }
     });
 
