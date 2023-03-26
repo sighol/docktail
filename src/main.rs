@@ -157,6 +157,13 @@ async fn main() -> Result<()> {
     }
 }
 
+fn container_is_running_this_process(container_rep: &RepContainer) -> bool {
+    // docker containers have a HOSTNAME environment that is a substring of the
+    // container id.
+    let hostname = std::env::var("HOSTNAME").unwrap_or("no hostname".to_string());
+    container_rep.id.contains(&hostname)
+}
+
 fn spawn_job(
     docker: Docker,
     container_rep: RepContainer,
@@ -172,6 +179,9 @@ fn spawn_job(
         // containers, it is more likely that it was this program that was
         // restarted, so we shouldn't add duplicated lines.
         let tail = if container_rep.created > start_time {
+            "all"
+        } else if container_is_running_this_process(&container_rep) {
+            // If this is docktail, then we want all the logs.
             "all"
         } else {
             "0"
