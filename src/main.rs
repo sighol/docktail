@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 
 use hyper::{
@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use eyre::{self, ContextCompat, WrapErr};
+use eyre::{self, Result, WrapErr};
 
 use tokio::{
     self,
@@ -77,7 +77,7 @@ async fn prometheus_server() {
 }
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
+async fn main() -> Result<()> {
     let formatting_layer =
         BunyanFormattingLayer::new(env!("CARGO_PKG_NAME").into(), std::io::stdout);
     let subscriber = Registry::default()
@@ -214,8 +214,8 @@ fn spawn_job(
             let result = log_result
                 .wrap_err("Failed to read chunk")
                 .and_then(|chunk| extract_text(chunk))
-                .and_then(|message| create_message(message, map.clone()))
-                .and_then(|request| Ok(sender.send(request)));
+                .map(|message| create_message(message, map.clone()))
+                .map(|request| sender.send(request));
             match result {
                 Ok(_) => (),
                 Err(e) => error!("Failed to create loki logger request message {:?}", e),
@@ -228,22 +228,14 @@ fn spawn_job(
     })
 }
 
-fn extract_text(chunk: TtyChunk) -> eyre::Result<String> {
+fn extract_text(chunk: TtyChunk) -> Result<String> {
     Ok(std::str::from_utf8(&chunk)?.to_string())
 }
 
-fn create_message(message: String, labels: HashMap<String, String>) -> eyre::Result<LokiStream> {
-    let start = Utc::now();
-    let time_ns: i64 = time_offset_since(start).wrap_err("No start time")?;
-    let time_ns: String = time_ns.to_string();
-    Ok(LokiStream {
+fn create_message(message: String, labels: HashMap<String, String>) -> LokiStream {
+    let time_ns: String = Utc::now().timestamp_nanos().to_string();
+    LokiStream {
         stream: labels,
         values: vec![[time_ns, message]],
-    })
-}
-
-fn time_offset_since(time: DateTime<Utc>) -> Option<i64> {
-    let start = Utc.with_ymd_and_hms(1970, 1, 1, 0, 0, 0).single()?;
-    let since_start = time - start;
-    since_start.num_nanoseconds()
+    }
 }
