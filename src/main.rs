@@ -28,7 +28,6 @@ use tokio::{
 };
 
 use tracing::{error, info};
-use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
 mod loki;
@@ -78,11 +77,7 @@ async fn prometheus_server() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let formatting_layer =
-        BunyanFormattingLayer::new(env!("CARGO_PKG_NAME").into(), std::io::stdout);
-    let subscriber = Registry::default()
-        .with(JsonStorageLayer)
-        .with(formatting_layer);
+    let subscriber = Registry::default().with(tracing_logfmt::layer());
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     tokio::spawn(async { prometheus_server().await });
@@ -117,7 +112,8 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            if loki_request.streams.len() > 0 {
+            let num_requests = loki_request.streams.len();
+            if num_requests > 0 {
                 LOKI_REQUEST_COUNTER.inc();
                 match loki.log(loki_request).await {
                     Ok(_) => (),
@@ -182,11 +178,11 @@ fn spawn_job(
         };
 
         info!(
-            "container {}. state={}, name={}, tail={}",
-            container_rep.id,
-            container_rep.state,
-            container_rep.names.get(0).unwrap_or(&"oops".to_string()),
-            tail,
+            container = container_rep.id,
+            state = container_rep.state,
+            name = container_rep.names.get(0).unwrap_or(&"oops".to_string()),
+            tail = tail,
+            "Started listening"
         );
 
         let mut stream = container.logs(
