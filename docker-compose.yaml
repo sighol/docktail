@@ -9,6 +9,7 @@ services:
     restart: always
     volumes:
       - loki:/loki
+      - ./etc-loki:/etc/loki
 
   docktail:
     build: .
@@ -21,7 +22,6 @@ services:
     ports:
       - "127.0.0.1:9898:9898"
     restart: always
-
 
 volumes:
   loki: {}
