@@ -1,4 +1,4 @@
-FROM rust:1.68.1 as build
+FROM rust:1.71.0 as build
 ENV PKG_CONFIG_ALLOW_CROSS=1
 
 RUN USER=root cargo new docktail
