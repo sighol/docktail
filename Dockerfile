@@ -17,5 +17,11 @@ RUN cargo build --release
 
 FROM debian:bookworm
 WORKDIR /docktail
+
+RUN apt-get update \
+    && apt-get install -y libssl3 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /docktail/target/release/docktail docktail
 CMD ["./docktail"]

@@ -27,7 +27,8 @@ use tokio::{
     time::sleep,
 };
 
-use tracing::{error, info};
+use tracing::{error, info, level_filters::LevelFilter};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
 mod loki;
@@ -75,10 +76,26 @@ async fn prometheus_server() {
     }
 }
 
+fn setup_tracing() {
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    if std::env::var("PRODUCTION").is_ok() {
+        let subscriber = Registry::default()
+            .with(tracing_logfmt::layer())
+            .with(env_filter);
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+    } else {
+        let subscriber = Registry::default()
+            .with(tracing_subscriber::fmt::layer())
+            .with(env_filter);
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let subscriber = Registry::default().with(tracing_logfmt::layer());
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    setup_tracing();
 
     tokio::spawn(async { prometheus_server().await });
 
@@ -239,7 +256,10 @@ fn extract_text(chunk: TtyChunk) -> Result<String> {
 }
 
 fn create_message(message: String, labels: HashMap<String, String>) -> LokiStream {
-    let time_ns: String = Utc::now().timestamp_nanos().to_string();
+    let time_ns: String = Utc::now()
+        .timestamp_nanos_opt()
+        .expect("timestamp_nanos_opt")
+        .to_string();
     LokiStream {
         stream: labels,
         values: vec![[time_ns, message]],
