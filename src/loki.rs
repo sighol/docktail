@@ -41,6 +41,7 @@ impl LokiLogger {
             .json(&message)
             .send()
             .await
+            .and_then(|x| x.error_for_status())
             .wrap_err("Reqwest")
     }
 }
