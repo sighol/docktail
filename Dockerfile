@@ -1,4 +1,4 @@
-FROM rust:1.71.0 as build
+FROM rust:1.83.0 AS build
 ENV PKG_CONFIG_ALLOW_CROSS=1
 
 RUN USER=root cargo new docktail
@@ -15,7 +15,7 @@ COPY ./src ./src
 
 RUN cargo build --release
 
-FROM debian:bullseye
+FROM debian:bookworm
 WORKDIR /docktail
 COPY --from=build /docktail/target/release/docktail docktail
 CMD ["./docktail"]
