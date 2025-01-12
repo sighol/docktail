@@ -1,25 +1,27 @@
 services:
-  loki:
-    image: grafana/loki:2.7.4
-    ports:
-      - "127.0.0.1:3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
-    restart: always
-    volumes:
-      - loki:/loki
-      - ./etc-loki:/etc/loki
-
   docktail:
     build: .
     environment:
-      LOKI_URL: "http://loki:3100/loki/api/v1/push"
+      LOKI_URL: "http://victorialogs:9428/insert/loki/api/v1/push"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
     depends_on:
-      - loki
+      - victorialogs
     ports:
       - "127.0.0.1:9898:9898"
     restart: always
 
+  victorialogs:
+    container_name: victorialogs
+    image: victoriametrics/victoria-logs:v1.4.0-victorialogs
+    command:
+      - "--storageDataPath=/vlogs"
+      - "--httpListenAddr=:9428"
+      - "--retentionPeriod=8w"
+    volumes:
+      - victorialogs:/vlogs
+    ports:
+      - "127.0.0.1:9428:9428"
+
 volumes:
-  loki: {}
+  victorialogs: {}
