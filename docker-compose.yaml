@@ -1,9 +1,10 @@
 services:
   docktail:
     build: .
-    environment:
-      LOKI_URL: "http://victorialogs:9428/insert/loki/api/v1/push"
+    command:
+      - "--config=/docktail/config.json"
     volumes:
+      - "./config.json:/docktail/config.json:ro"
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
     depends_on:
       - victorialogs

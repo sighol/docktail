@@ -1,12 +1,18 @@
-use chrono::{DateTime, Utc};
-use futures::StreamExt;
+mod config;
+mod loki;
 
+use chrono::{DateTime, Utc};
+use clap::Parser;
+use eyre::{self, Result, WrapErr};
+use futures::StreamExt;
 use hyper::{
     header::CONTENT_TYPE,
     service::{make_service_fn, service_fn},
     Body, Request, Response, Server,
 };
+use itertools::{self, Itertools};
 use lazy_static::lazy_static;
+use loki::{LokiLogger, LokiRequest, LokiStream};
 use prometheus::{opts, register_counter, Counter, Encoder, TextEncoder};
 use shiplift::{
     builder::ContainerListOptions, rep::Container as RepContainer, tty::TtyChunk, Docker,
@@ -14,25 +20,14 @@ use shiplift::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     sync::{Arc, Mutex},
     time::Duration,
 };
-
-use eyre::{self, Result, WrapErr};
-
-use tokio::{
-    self,
-    sync::mpsc::{unbounded_channel, UnboundedSender},
-    task::JoinHandle,
-    time::sleep,
-};
-
+use tokio::{self, task::JoinHandle, time::sleep};
 use tracing::{error, info, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
-
-mod loki;
-use loki::{LokiLogger, LokiRequest, LokiStream};
 
 lazy_static! {
     static ref LOKI_REQUEST_COUNTER: Counter = register_counter!(opts!(
@@ -93,35 +88,28 @@ fn setup_tracing() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    setup_tracing();
+#[derive(Clone)]
+struct LogMessage {
+    time: DateTime<Utc>,
+    container: String,
+    message: String,
+}
 
-    tokio::spawn(async { prometheus_server().await });
-
-    let start_time: DateTime<Utc> = Utc::now();
-    let docker = Docker::new();
-    let loki_url = match std::env::var("LOKI_URL") {
-        Ok(x) => x,
-        Err(_) => {
-            error!("Please set the LOKI_URL environment variable");
-            std::process::exit(1);
-        }
-    };
-    info!("Starting docktail...");
-    info!("Logging to {}", &loki_url);
-
-    let (sender, mut receiver) = unbounded_channel::<LokiStream>();
+async fn spawn_logger(
+    mut receiver: tokio::sync::broadcast::Receiver<LogMessage>,
+    tags: HashMap<String, String>,
+    target: config::Target,
+) {
     tokio::spawn(async move {
-        let loki = LokiLogger::new(loki_url);
+        let loki = LokiLogger::new(target.url, target.basic_auth);
 
         loop {
-            let mut loki_request = LokiRequest { streams: vec![] };
+            let mut logs = vec![];
             loop {
                 match receiver.try_recv() {
                     Ok(m) => {
                         LOKI_STREAM_COUNTER.inc();
-                        loki_request.streams.push(m)
+                        logs.push(m)
                     }
                     Err(_) => {
                         // Either disconnect or empty. In both cases, we are done retrieving streams.
@@ -129,6 +117,30 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            let mut loki_request = LokiRequest { streams: vec![] };
+            logs.sort_by_key(|log| log.container.clone());
+
+            for (container_name, chunk) in &logs.into_iter().chunk_by(|log| log.container.clone()) {
+                let mut labels = HashMap::<String, String>::new();
+                labels.insert("container".into(), container_name);
+                for (key, value) in tags.iter() {
+                    labels.insert(key.clone(), value.clone());
+                }
+                loki_request.streams.push(LokiStream {
+                    stream: labels,
+                    values: chunk
+                        .map(|message| {
+                            let time = message
+                                .time
+                                .timestamp_nanos_opt()
+                                .unwrap_or_default()
+                                .to_string();
+                            [time, message.message]
+                        })
+                        .collect(),
+                });
+            }
+
             let num_requests = loki_request.streams.len();
             if num_requests > 0 {
                 LOKI_REQUEST_COUNTER.inc();
@@ -141,6 +153,34 @@ async fn main() -> Result<()> {
             sleep(Duration::from_millis(500)).await;
         }
     });
+}
+
+#[derive(Parser)]
+struct Cli {
+    #[arg(long)]
+    config: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Cli::parse();
+    let config = fs::read_to_string(args.config)?;
+    let config: config::Config = serde_json::from_str(&config)?;
+    setup_tracing();
+
+    tokio::spawn(async { prometheus_server().await });
+
+    let start_time: DateTime<Utc> = Utc::now();
+    let docker = Docker::new();
+    info!("Starting docktail...");
+
+    let (sender, receiver) = tokio::sync::broadcast::channel(100);
+
+    let tags = config.tags.clone();
+    for target in config.targets.into_iter() {
+        spawn_logger(sender.subscribe(), tags.clone(), target).await;
+    }
+    drop(receiver);
 
     let containers_set = Arc::new(Mutex::new(HashSet::<String>::new()));
 
@@ -186,7 +226,7 @@ fn spawn_job(
     container_rep: RepContainer,
     set: Arc<Mutex<HashSet<String>>>,
     start_time: DateTime<Utc>,
-    sender: UnboundedSender<LokiStream>,
+    sender: tokio::sync::broadcast::Sender<LogMessage>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let container = docker.containers().get(&container_rep.id);
@@ -237,7 +277,11 @@ fn spawn_job(
             let result = log_result
                 .wrap_err("Failed to read chunk")
                 .and_then(|chunk| extract_text(chunk))
-                .map(|message| create_message(message, map.clone()))
+                .map(|message| LogMessage {
+                    time: Utc::now(),
+                    container: container_name.into(),
+                    message: message,
+                })
                 .map(|request| sender.send(request));
             match result {
                 Ok(_) => (),
@@ -253,15 +297,4 @@ fn spawn_job(
 
 fn extract_text(chunk: TtyChunk) -> Result<String> {
     Ok(std::str::from_utf8(&chunk)?.to_string())
-}
-
-fn create_message(message: String, labels: HashMap<String, String>) -> LokiStream {
-    let time_ns: String = Utc::now()
-        .timestamp_nanos_opt()
-        .expect("timestamp_nanos_opt")
-        .to_string();
-    LokiStream {
-        stream: labels,
-        values: vec![[time_ns, message]],
-    }
 }

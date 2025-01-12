@@ -5,43 +5,51 @@ use eyre::{self, WrapErr};
 
 use reqwest;
 
-// The loki code is taken from this repository
-// https://github.com/nwmqpa/loki-logger
-// That is AGPL, which I don't want this repository to be.
-// But, the code is basically just using the Loki's API. So is it really copyrightable?
-#[derive(Serialize, Debug)]
-pub struct LokiStream {
-    pub stream: HashMap<String, String>,
-    pub values: Vec<[String; 2]>,
-}
+use crate::config::BasicAuth;
 
 #[derive(Serialize, Debug)]
 pub struct LokiRequest {
     pub streams: Vec<LokiStream>,
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct LokiStream {
+    pub stream: HashMap<String, String>,
+    pub values: Vec<[String; 2]>,
+}
+
 pub struct LokiLogger {
     url: String,
     client: reqwest::Client,
+    basic_auth: Option<BasicAuth>,
 }
 
 impl LokiLogger {
-    pub fn new(url: String) -> Self {
+    pub fn new(url: String, basic_auth: Option<BasicAuth>) -> Self {
         Self {
             url: url,
             client: reqwest::Client::new(),
+            basic_auth,
         }
     }
 
     pub async fn log(&self, message: LokiRequest) -> eyre::Result<reqwest::Response> {
         let client = self.client.clone();
         let url = self.url.clone();
-        client
-            .post(url)
+        let mut request = client.post(url);
+
+        if let Some(basic_auth) = &self.basic_auth {
+            request = request.basic_auth(
+                basic_auth.username.clone(),
+                Some(basic_auth.password.clone()),
+            );
+        }
+
+        request
             .json(&message)
             .send()
             .await
             .and_then(|x| x.error_for_status())
-            .wrap_err("Reqwest")
+            .wrap_err("reqwest")
     }
 }
