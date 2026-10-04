@@ -1,0 +1,17 @@
+{
+  "tags": {
+    "server": "sighol-desktop"
+  },
+  "targets": [
+    {
+      "url": "http://localhost:9428/insert/loki/api/v1/push"
+    },
+    {
+      "url": "https://logs.home.sighol.com/insert/loki/api/v1/push",
+      "basic_auth": {
+        "username": "sighol3",
+        "password": "6BCwnFZBhNI0Aa0MxwYM"
+      }
+    }
+  ]
+}

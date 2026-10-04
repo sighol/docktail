@@ -1,0 +1,11 @@
+{
+  "tags": {
+    "machine": "home-server",
+    "instance": "localhost:8080"
+  },
+  "targets": [
+    {
+      "url": "http://victorialogs:9428/insert/loki/api/v1/push"
+    }
+  ]
+}
