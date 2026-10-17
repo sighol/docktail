@@ -1,6 +1,6 @@
 {
   "tags": {
-    "machine": "sighol3",
+    "machine": "sighol4",
     "instance": "prometheus.sighol.com"
   },
   "targets": [

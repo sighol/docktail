@@ -7,10 +7,10 @@ run-alpine:
 		docktail:alpine-3.15 sh
 
 upload-configs:
-	rsync config_homeserver.json home-server:docktail/config.json
-	rsync config_sighol3.json sighol3:docktail/config.json
-	ssh home-server -- bash -c "cd docktail && docker compose restart docktail"
-	ssh sighol3 -- bash -c "cd docktail && docker compose restart docktail"
+# 	rsync config_homeserver.json home-server:docktail/config.json
+	rsync config_sighol4.json sighol4:docktail/config.json
+# 	ssh home-server -- bash -c "cd docktail && docker compose restart docktail"
+	ssh sighol4 "cd docktail && docker compose restart docktail"
 
 upload-home-server:
 	rsync config_homeserver.json home-server:docktail/config.json
